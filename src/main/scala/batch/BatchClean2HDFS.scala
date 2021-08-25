@@ -1,8 +1,13 @@
 package batch
 
-import org.apache.spark.sql.types.{StringType, StructField, StructType}
+import java.sql.Timestamp
+import java.text.SimpleDateFormat
+
+import model.ODWithFlow
+import org.apache.spark.sql.types.{IntegerType, StringType, StructField, StructType}
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions.window
+import utils.TimestampUtil
 
 class BatchClean2HDFS(sparkSession: SparkSession) extends Serializable {
   def toDateTime(date: String, time: String): String = {
@@ -82,10 +87,20 @@ from od
       StructField("out_id", StringType, nullable = true)
     )
     )
+    val dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
     for (currentDate <- startInt to endInt) {
       val odResultFilePath = s"/odPair/$currentDate"
       val odFrame = sparkSession.read.schema(odSchema).csv(odFilePath + odResultFilePath).select("in_time", "in_id", "out_id")
-      val odAggregationFrame = odFrame.groupBy(window($"in_time", "15 minutes"), $"in_id", $"out_id").count()
+      val odAggregationFrame = odFrame.select("in_time", "in_id", "out_id")
+        .map(x => {
+          val inTime = x.getString(0)
+          val timestamp = TimestampUtil.timeAgg(Timestamp.valueOf(inTime))
+          val finalInTime = dateFormat.format(timestamp)
+          val inId = x.getString(1)
+          val outId = x.getString(2)
+          ODWithFlow(inId, outId, finalInTime, 1)
+        }).select("inId", "outId", "inTime", "passengers")
+        .groupBy("inId", "outId", "inTime").count()
       val odAggregationPath = s"/odAggregation/$currentDate"
       odAggregationFrame.coalesce(1).write.mode("append").csv(targetPath + odAggregationPath)
     }
@@ -99,6 +114,8 @@ from od
 
 object BatchClean2HDFS {
   def main(args: Array[String]): Unit = {
-
+    val sparkSession = SparkSession.builder().appName("BatchClean2HDFS").master("local[*]").getOrCreate()
+    val batchClean2HDFS = new BatchClean2HDFS(sparkSession)
+    batchClean2HDFS.odAggregation("D:/Destop", 20210224, 20210224, "D:/Destop/")
   }
 }
